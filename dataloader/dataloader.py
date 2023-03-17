@@ -2,17 +2,47 @@ import torch
 import numpy as np
 import pandas as pd
 import os
+import talib
+from talib.abstract import *
 from utils.logger import get_logger
 LOG = get_logger('data_loader')
+
+
+def add_features(stock_df):
+    #add indicators
+    """ inputs = {
+        'open': stock_df['open'].to_numpy(dtype='float'), 
+        'high': stock_df['high'].to_numpy(dtype='float'), 
+        'low': stock_df['low'].to_numpy(dtype='float'), 
+        'close': stock_df['close'].to_numpy(dtype='float'), 
+        'volume': stock_df['volume'].to_numpy(dtype='float'), 
+    }
+    stock_df['macd'], _, _ = MACD(inputs)
+    stock_df['boll_ub'], _, stock_df['boll_lb'] = BBANDS(inputs)
+    stock_df['rsi_30'] = RSI(inputs, timeperiod=30)
+    stock_df['cci_30'] = CCI(inputs, timeperiod=30)
+    stock_df['dx_30'] = DX(inputs, timeperiod=30)
+    stock_df['close_sma_30'] = SMA(inputs, timeperiod=30)
+    stock_df['close_sma_60'] = SMA(inputs, timeperiod=60) """
+
+    #add output
+    stock_df['price_change'] = stock_df['close'].shift(-1) / stock_df['close'] - 1
+    stock_df['label'] = np.where(np.array(stock_df['price_change']) > 0, 1, 0)
+
+    #remove na rows
+    stock_df.dropna(axis=0, how='any', inplace=True)
+    return stock_df
 
 class DataLoader:
 
 
-    def __init__(self, vn30_x_train_np, vn30_y_train_np, vn30_x_test_np, vn30_y_test_np, input_dim):
+    def __init__(self, vn30_x_train_np, vn30_y_train_np_dict, vn30_x_val_np, vn30_y_val_np_dict, vn30_x_test_np, vn30_y_test_np_dict, input_dim):
         self.vn30_x_train_np = vn30_x_train_np
-        self.vn30_y_train_np = vn30_y_train_np
+        self.vn30_y_train_np_dict = vn30_y_train_np_dict
+        self.vn30_x_val_np = vn30_x_val_np
+        self.vn30_y_val_np_dict = vn30_y_val_np_dict
         self.vn30_x_test_np = vn30_x_test_np
-        self.vn30_y_test_np = vn30_y_test_np
+        self.vn30_y_test_np_dict = vn30_y_test_np_dict
         self.input_dim = input_dim
     
     @classmethod
@@ -20,99 +50,96 @@ class DataLoader:
         LOG.info(f'Loading dataset...')
         thesis_dir = cfg.path
         test_day = cfg.test_day
+        val_day = cfg.val_day
         seq_len = cfg.seq_len
 
         stock_files = os.listdir(thesis_dir)
-        feature_dim = 0
         x_train_dict = {}
         y_train_dict = {}
+        x_val_dict = {}
+        y_val_dict = {}
         x_test_dict = {}
         y_test_dict = {}
         
         for file in stock_files:
-            stock = pd.read_csv(thesis_dir + file, index_col='date')            
-            y = stock.loc[:, ['price_change', 'label']]
-            x = stock.drop(['price_change', 'label'], axis=1)
-            if feature_dim == 0:
-                feature_dim = x.shape[1]
+            stock_df = pd.read_csv(thesis_dir + file, index_col='date')
+            stock_df = add_features(stock_df)
 
-            mean = x[x.index < test_day].mean(axis=0)
-            std = x[x.index < test_day].std(axis=0)
+            y = stock_df.loc[:, ['price_change', 'label']]
+            x = stock_df.drop(['price_change', 'label'], axis=1)
+
+            mean = x[x.index < val_day].mean(axis=0)
+            std = x[x.index < val_day].std(axis=0)
             x = (x - mean) / std
 
             hist_x = pd.concat([x.shift(i) for i in range((seq_len - 1), -1, -1)], axis=1)
             hist_x.drop(hist_x.head(seq_len - 1).index, inplace=True)
-            y.drop(y.head(seq_len - 1).index, inplace=True)
+            y.drop(y.head(seq_len - 1).index, inplace=True) 
 
-            x_train = hist_x[hist_x.index < test_day]
+            x_train = hist_x[hist_x.index < val_day]
+            x_val = hist_x[(hist_x.index >= val_day) & (hist_x.index < test_day)]
             x_test = hist_x[hist_x.index >= test_day]
 
-            y_train = y[y.index < test_day]
+            y_train = y[y.index < val_day]
+            y_val = y[(y.index >= val_day) & (y.index < test_day)]
             y_test = y[y.index >= test_day]
 
             x_train_dict[file[:-4]] = x_train
             y_train_dict[file[:-4]] = y_train
+            x_val_dict[file[:-4]] = x_val
+            y_val_dict[file[:-4]] = y_val
             x_test_dict[file[:-4]] = x_test
-            y_test_dict[file[:-4]] = y_test
+            y_test_dict[file[:-4]] = y_test 
             
         vn30_x_train = pd.concat(list(x_train_dict.values()), axis=0).sort_index(axis=0)
-        vn30_x_train_np = np.reshape(np.array(vn30_x_train, dtype='float32'), (-1, seq_len, feature_dim))
+        vn30_x_train_np = np.reshape(np.array(vn30_x_train, dtype='float32'), (vn30_x_train.shape[0], seq_len, -1))
+
+        vn30_x_val = pd.concat(list(x_val_dict.values()), axis=0).sort_index(axis=0)
+        vn30_x_val_np = np.reshape(np.array(vn30_x_val, dtype='float32'), (vn30_x_val.shape[0], seq_len, -1))
 
         vn30_x_test = pd.concat(list(x_test_dict.values()), axis=0).sort_index(axis=0)
-        vn30_x_test_np = np.reshape(np.array(vn30_x_test, dtype='float32'), (-1, seq_len, feature_dim))
+        vn30_x_test_np = np.reshape(np.array(vn30_x_test, dtype='float32'), (vn30_x_test.shape[0], seq_len, -1))
 
         vn30_y_train = pd.concat(list(y_train_dict.values()), axis=0).sort_index(axis=0)
-        vn30_y_train_np = np.array(vn30_y_train, dtype='float32')
+        vn30_y_train_np_dict = {'price_change' : np.array(vn30_y_train['price_change'], dtype='float32'),\
+                                 'label' : np.array(vn30_y_train['label'], dtype='int32')}
+        
+        vn30_y_val = pd.concat(list(y_val_dict.values()), axis=0).sort_index(axis=0)
+        vn30_y_val_np_dict = {'price_change' : np.array(vn30_y_val['price_change'], dtype='float32'),\
+                                 'label' : np.array(vn30_y_val['label'], dtype='int32')}
         
         vn30_y_test = pd.concat(list(y_test_dict.values()), axis=0).sort_index(axis=0)
-        vn30_y_test_np = np.array(vn30_y_test, dtype='float32')
+        vn30_y_test_np_dict = {'price_change' : np.array(vn30_y_test['price_change'], dtype='float32'),\
+                                 'label' : np.array(vn30_y_test['label'], dtype='int32')}
 
         input_dim = vn30_x_train_np.shape[1:]
-        """ print(vn30_x_train_np.shape)
-        print(vn30_x_test_np.shape) """
-        return cls(vn30_x_train_np, vn30_y_train_np, vn30_x_test_np, vn30_y_test_np, input_dim)
+        """ 
+        print(vn30_x_val_np.shape)
+        print(vn30_y_val_np_dict)
+         """
+        LOG.info(f'Loading finished')
+        
+        return cls(vn30_x_train_np, vn30_y_train_np_dict, vn30_x_val_np, vn30_y_val_np_dict, vn30_x_test_np, vn30_y_test_np_dict, input_dim)
     
     def get_train(self):
-        return self.vn30_x_train_np, self.vn30_y_train_np
+        return self.vn30_x_train_np, self.vn30_y_train_np_dict
+    
+    def get_val(self):
+        return self.vn30_x_val_np, self.vn30_y_val_np_dict
     
     def get_test(self):
-        return self.vn30_x_test_np, self.vn30_y_test_np
-    
-    def get_input_dim(self):
-        return self.input_dim
+        return self.vn30_x_test_np, self.vn30_y_test_np_dict
     
     def get_3D_train(self):
         "tra du lieu duoi dang channel, height, width"
-        return np.expand_dims(self.vn30_x_train_np, 1), self.vn30_y_train_np
+        return np.expand_dims(self.vn30_x_train_np, axis=1), self.vn30_y_train_np_dict
+    
+    def get_3D_val(self):
+        return np.expand_dims(self.vn30_x_val_np, axis=1), self.vn30_y_val_np_dict
     
     def get_3D_test(self):
         "tra du lieu duoi dang channel, height, width"
-        return np.expand_dims(self.vn30_x_test_np, 1), self.vn30_y_test_np
-    """
-    @staticmethod
-    def preprocess_data(image, image_size):
-        return DataLoader._image_to_tensor(DataLoader._resize_and_bgr2gray(image, image_size), image_size)
-    
-    @staticmethod
-    def _image_to_tensor(image, image_size):
-        image_tensor = image.transpose(2, 0, 1)
-        image_tensor = image_tensor.astype(np.float32)
-        image_tensor = torch.from_numpy(image_tensor)
-        if torch.cuda.is_available():  # put on GPU if CUDA is available
-            image_tensor = image_tensor.cuda()
-        return image_tensor
+        return np.expand_dims(self.vn30_x_test_np, axis=1), self.vn30_y_test_np_dict
 
-    @staticmethod
-    def _resize_and_bgr2gray(image, image_size):
-        image = image[0:288, 0:404]
-        image_data = cv2.cvtColor(cv2.resize(image, (84, 84)), cv2.COLOR_BGR2GRAY)
-        image_data[image_data > 0] = 255
-        image_data = np.reshape(image_data, (84, 84, 1))
-        return image_data
-    
-    
-    @staticmethod
-    def produce_new_state(old_state, new_image, image_size):
-        new_image = DataLoader().preprocess_data(new_image, image_size)
-        return torch.cat((old_state.squeeze(0)[1:, :, :], new_image)).unsqueeze(0)
-    """
+    def get_input_dim(self):
+        return self.input_dim

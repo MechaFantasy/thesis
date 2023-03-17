@@ -7,15 +7,15 @@ from collections import deque
 import torch
 import torch.nn as nn
 import numpy as np
-import datetime
 import os
 # external
 from .base_agent import BaseAgent
 from utils.logger import get_logger
 from executor.trend_agent_trainer import TrendAgentTrainer
-from .model import TrendNet
+from .model import *
 from .metrics_logger import MetricsLogger
 from environment.trend_env import TrendEnv
+from callbacks.callbacks import *
 # internal
 LOG = get_logger('trend_agent')
 
@@ -25,11 +25,20 @@ class TrendAgent(BaseAgent):
     def __init__(self, cfg, input_dim):
         super().__init__(cfg)
         self.state_dim = input_dim
+        seq_len = input_dim[0]
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.policy_net = TrendNet(self.state_dim, cfg.model).to(device=self.device)
-        self.target_net = TrendNet(self.state_dim, cfg.model).to(device=self.device)
-        self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.action_dim = cfg.model.action_dim
+        self.model_type = cfg.train.model_type
+        if self.model_type == 'CNN':
+            self.policy_net = CNNTrendNet(self.state_dim, cfg.model.CNN).to(device=self.device)
+            self.target_net = CNNTrendNet(self.state_dim, cfg.model.CNN).to(device=self.device)
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+        elif self.model_type == 'LSTM':
+            self.policy_net = LSTMTrendNet(self.state_dim, cfg.model.LSTM).to(device=self.device)
+            self.target_net = LSTMTrendNet(self.state_dim, cfg.model.LSTM).to(device=self.device)
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+        
+            
+        self.action_dim = 2
 
         self.exploration_rate = cfg.train.exploration_rate
         self.exploration_rate_min = cfg.train.exploration_rate_min
@@ -37,27 +46,26 @@ class TrendAgent(BaseAgent):
         self.curr_step = 0
         self.gamma = cfg.train.gamma
 
-        self.relay_memory = deque(maxlen=cfg.train.relay_memory)
+        self.replay_memory = deque(maxlen=cfg.train.replay_memory_size)
         self.batch_size = cfg.train.batch_size
         self.episodes = cfg.train.episodes
+        self.start_from_episode = cfg.train.start_from_episode
 
         self.sync_every = cfg.train.sync_every
-        self.save_every = cfg.train.save_every
         self.learn_every = cfg.train.learn_every
         self.burnin = cfg.train.burnin
 
         self.loss_fn = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=cfg.train.lr)
-        
+        self.patience = cfg.train.patience
         self.env_mode = cfg.env.mode
 
-        present_time = datetime.datetime.now()
-        self.checkpoints = cfg.save.checkpoints + f'{self.env_mode}/{present_time}/' 
-        self.logs = cfg.save.logs + f'{self.env_mode}/{present_time}/' 
+        
+        save_specs = f'{self.env_mode}/' + f'{self.model_type}-seq{seq_len}-g{self.gamma}-m{cfg.train.replay_memory_size}-b{self.batch_size}-e{self.episodes}-sync{self.sync_every}-le{self.learn_every}-bu{self.burnin}-p{self.patience}/'
+        self.checkpoints = cfg.save.base + cfg.save.checkpoints + save_specs
+        self.logs = cfg.save.base + cfg.save.logs + save_specs
         os.makedirs(self.checkpoints, exist_ok=True)
         os.makedirs(self.logs, exist_ok=True)
-        
-        self.load_path = self.checkpoints + f'trend_net_{cfg.test.load}.chkpt'
 
     def act(self, state):
         """Given a state, choose an epsilon-greedy action"""
@@ -71,7 +79,6 @@ class TrendAgent(BaseAgent):
 
         self.exploration_rate *= self.exploration_decay
         self.exploration_rate = max(self.exploration_rate, self.exploration_rate_min)
-
         self.curr_step += 1
         return trend_idx
     
@@ -90,13 +97,6 @@ class TrendAgent(BaseAgent):
         ]
         return (reward + (1 - done.float()) * self.gamma * next_Q).float()
     
-    def update_Q_online(self, td_estimate, td_target):
-        loss = self.loss_fn(td_estimate, td_target)
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
-
     def sync_Q_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
@@ -108,31 +108,18 @@ class TrendAgent(BaseAgent):
         reward = torch.tensor([reward], device=self.device)
         done = torch.tensor([done], device=self.device)
 
-        self.relay_memory.append((state, next_state, action, reward, done))
+        self.replay_memory.append((state, next_state, action, reward, done))
 
     def recall(self):
         """Sample experiences from memory"""
-        batch = random.sample(self.relay_memory, self.batch_size)
+        batch = random.sample(self.replay_memory, self.batch_size)
         state, next_state, action, reward, done = map(torch.stack, zip(*batch))
         return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
     
-    def save(self):
-        save_path = (
-            self.checkpoints + f"trend_net_{int(self.curr_step // self.save_every)}.chkpt"
-        )
-        torch.save(
-            dict(policy=self.policy_net.state_dict(), target=self.target_net.state_dict(), exploration_rate=self.exploration_rate),
-            save_path,
-        )
-        LOG.info(f"Trend saved to {save_path} at step {self.curr_step}")
-
     def learn(self):
         """Update online action value (Q) function with a batch of experiences"""
         if self.curr_step % self.sync_every == 0:
             self.sync_Q_target()
-
-        if self.curr_step % self.save_every == 0:
-            self.save()
 
         if self.curr_step < self.burnin:
             return 0
@@ -140,52 +127,94 @@ class TrendAgent(BaseAgent):
         if self.curr_step % self.learn_every != 0:
             return 0
 
-        # Sample from memory
         state, next_state, action, reward, done = self.recall()
-
-        # Get TD Estimate
         td_est = self.td_estimate(state, action)
-
-        # Get TD Target
         td_tgt = self.td_target(reward, next_state, done)
+        
+        loss = self.loss_fn(td_est, td_tgt)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
 
-        # Backpropagate loss through Q_online
-        loss = self.update_Q_online(td_est, td_tgt)
+    def calc_loss(self, state, action, next_state, reward, done):
+        torch_state = torch.tensor(state, device=self.device).unsqueeze(0)
+        torch_next_state = torch.tensor(next_state, device=self.device).unsqueeze(0)
+        torch_action = torch.tensor([action], device=self.device)
+        torch_reward = torch.tensor([reward], device=self.device)
+        torch_done = torch.tensor([done], device=self.device)
+        
+        td_est = self.policy_net(torch_state).squeeze(0)[torch_action]
+        
+        next_state_Q = self.policy_net(torch_next_state)
+        best_action = torch.argmax(next_state_Q, axis=1)
+        next_Q = self.target_net(torch_next_state).squeeze(0)[best_action]
+        td_tgt = (torch_reward + (1 - torch_done.float()) * self.gamma * next_Q)
 
+        loss = self.loss_fn(td_est, td_tgt).item()
         return loss
     
-    def train(self, data_loader):      
-        logger = MetricsLogger(self.logs)
-        TrendAgentTrainer().train(self, data_loader, logger, self.env_mode)
+    def load(self, best_agent_chkpt_file='best.chkpt'):
+        chkpt_files = os.listdir(self.checkpoints)
+        if best_agent_chkpt_file in chkpt_files:
+            filepath = self.checkpoints + best_agent_chkpt_file
+            checkpoint_dict = torch.load(filepath)
+            self.policy_net.load_state_dict(checkpoint_dict['policy'])
+            self.target_net.load_state_dict(checkpoint_dict['target'])
+            self.exploration_rate = checkpoint_dict['exploration_rate']
+        
+    def train(self, data_loader):
+        self.load()
+        x_train, y_train, x_val, y_val = None, None, None, None
+        if self.model_type == 'CNN':
+            x_train, y_train = data_loader.get_3D_train()
+            x_val, y_val = data_loader.get_3D_val()
+        else: 
+            x_train, y_train = data_loader.get_train()
+            x_val, y_val = data_loader.get_val()
 
-    def load(self):
-        checkpoint_dict = torch.load(self.load_path)
-        self.policy_net.load_state_dict(checkpoint_dict['policy'])
-        self.target_net.load_state_dict(checkpoint_dict['target'])
-        self.exploration_rate = checkpoint_dict['exploration_rate']
+        env = TrendEnv(x_train, y_train, self.env_mode)
+        val_env = TrendEnv(x_val, y_val, self.env_mode) 
+        metrics = ['loss', 'reward', 'acc', 'f1']
+        logger = MetricsLogger()
+        callbacks = CallBackList(
+                        [
+                            AgentChechPoint(filepath=self.checkpoints, monitor='val_loss'), \
+                            TensorBoard(log_dir=self.logs), \
+                            EarlyStopping(monitor='val_loss', min_delta=0, patience=self.patience)
+                        ]
+                    )
+        
+        trainer = TrendAgentTrainer(self, env, val_env, metrics, logger, callbacks)  
+        trainer.train()
 
                 
-    def evaluate(self, data_loader):
-        LOG.info("Evaluation started")
+    def predict(self, data_loader):
+        LOG.info("Prediction started")
         self.load()
-
-        x_test, y_test = data_loader.get_3D_test()
+        x_test, y_test = None, None
+        if self.model_type == 'CNN':
+            x_test, y_test = data_loader.get_3D_test()
+        else: 
+            x_test, y_test = data_loader.get_test()
         env = TrendEnv(x_test, y_test, self.env_mode)
         total_reward = 0
+        avg_loss = 0
         state = env.reset()
         with torch.no_grad():
             while True:
                 action = self.act(state)
                 next_state, reward, done, info = env.step(action)
 
-                state = next_state
+                avg_loss += self.calc_loss(state, action, next_state, reward, done)
+                
                 total_reward += reward 
+                state = next_state
                 if done == 1:
                     accuracy = info['acc']
                     f1 = info['f1']
                     print('---------------------')
-                    print(f'Reward: {total_reward}, Accuracy: {accuracy}, F1-score: {f1}')
+                    print(f'Loss: {avg_loss / env.game_len}, Reward: {total_reward}, Accuracy: {accuracy}, F1-score: {f1}')
                     break
         
-        LOG.info('Evaluation finished')
-        
+        LOG.info('Prediction finished')

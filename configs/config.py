@@ -3,38 +3,43 @@
 
 CFG = {
     "data": {
-        'path' : './thesis_data/',
+        'path' : './data/',
+        'val_day' : '2021-07-05', 
         'test_day' : '2022-05-04',
-        'seq_len': 20
+        'seq_len': 60
     },
     'agent': {
         "model": {
-            'num_filter': 16,
-            'action_dim' : 2
+            'CNN' : {
+                'num_filter': 16
+            },
+            'LSTM' : {
+                'hidden_size' : 16
+            }
         },
         'train': {
-            'gamma' : 0.99,
-            'exploration_rate_min' : 0.1,
-            'exploration_rate' : 1,
-            'exploration_decay' : 0.99,
-            'relay_memory' : 15000,
-            'batch_size' : 1024,
-            'lr' : 1e-6, #learning_rate
+            'model_type' : 'CNN',
+            'gamma' : 0.9,
+            'exploration_rate_min' : 0.0001,
+            'exploration_rate' : .5,
+            'exploration_decay' : 0.9999,
+            'replay_memory_size' : 6000,
+            'batch_size' : 256,#256
+            'lr' : 0.001, #learning_rate
             'episodes': 50,
-            'sync_every' : 3e3, #cap nhat target_net moi gia tri sync_every
-            'save_every' : 3e4, #save model theo gia tri save_every
-            'learn_every' : 10, #hoc policy_net theo gia tri learn_every
-            'burnin' : 3e3  #chi hoc policy_net neu relay_memory > burnin
-        },
-        'test' : {
-            'load' : 100 #load_model_path
+            'start_from_episode' : 1,
+            'sync_every' : 1500, #cap nhat target_net moi gia tri sync_every
+            'learn_every' : 30, #hoc policy_net theo gia tri learn_every
+            'burnin' : 1000,  #chi hoc policy_net neu relay_memory > burnin
+            'patience' : 5
         },
         "save" : {
+            'base' : './',
             "checkpoints" : "checkpoints/",
             "logs" : "logs/"
         },
         'env' : {
-            'mode' : 'dynamic' #static : reward la hang so, dynamic: reward phu thuoc vao thay doi gia
+            'mode' : 'static' #static : reward la hang so, dynamic: reward phu thuoc vao thay doi gia
         }
     },
 }   
