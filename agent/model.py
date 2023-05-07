@@ -1,80 +1,83 @@
 import torch
 import torch.nn as nn
 
-class CNNTrendNet(nn.Module):
+class Exp(nn.Module):
 
-    def __init__(self, state_dim, model_cfg):
+
+    def __init__(self):
         super().__init__()
-        timestep_dim, feature_dim = state_dim
-        num_filter = model_cfg.num_filter
-        action_dim = 2
 
+    def forward(x):
+        return torch.exp(x)
 
-        self.conv1 = nn.Conv2d(1, num_filter, kernel_size=(1, feature_dim))
-        self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv2d(num_filter, num_filter, kernel_size=(3, 1))
-        self.relu2 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(kernel_size=(2, 1))
-        self.conv3 = nn.Conv2d(num_filter, num_filter, kernel_size=(3, 1))
-        self.relu3 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(kernel_size=(2, 1))
-        self.fc1 = nn.Linear(int((((timestep_dim - 3 + 1) // 2)    - 3 + 1) // 2) * num_filter, action_dim)
+""" class TrendNet(nn.Module):
 
-
-    def forward(self, input):
-        x = self.conv1(input)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        x = self.pool1(x)
-        x = self.conv3(x)
-        x = self.relu3(x)
-        x = self.pool2(x)
-        x = x.view(x.shape[0], -1)
-        x = self.fc1(x)
-
-        return x
-    
-
-class LSTMTrendNet(nn.Module):
-    def __init__(self, state_dim, model_cfg):
+    def __init__(self, input_shape, action_shape):
         super().__init__()
-        timestep_dim, feature_dim = state_dim
-        hidden_size = model_cfg.hidden_size
-        action_dim = 2
+        state_dim = input_shape[0]
+        action_dim = action_shape[0]
+        hidden_size_1 = 128
+        hidden_size = 16
 
-        self.lstm1 = nn.LSTM(feature_dim, hidden_size, batch_first=True)
-        self.fc1 = nn.Linear(hidden_size, 8)
-        self.relu1 = nn.ReLU()
-        self.fc2 = nn.Linear(8, 2)
+        self.shared_w = nn.Sequential(
+            nn.Linear(state_dim, hidden_size_1),
+            nn.Linear(hidden_size_1, hidden_size),
+            nn.ReLU()
+        )
+        self.mean = nn.Sequential(
+            nn.Linear(hidden_size, action_dim),
+            nn.Tanh()
+        )
+        self.std = nn.Sequential(
+            nn.Linear(hidden_size, action_dim)
+        )
+
+        self.value = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        lstm_o, _ = self.lstm1(x)
-        lstm_final_o = lstm_o[:, -1, :]
-        lstm_final_o = lstm_final_o.view(lstm_final_o.shape[0], -1)
-        fc1_o = self.fc1(lstm_final_o)
-        relu_o = self.relu1(fc1_o)
-        out = self.fc2(relu_o)
-        return out
+        l = self.shared_w(x)
+        mean = self.mean(l)
+        std = torch.exp(self.std(l))
+        dist = torch.distributions.Normal(mean, std)
+        value = self.value(l) 
+        return dist, value """
     
 
-class ALSTMTrendNet(nn.Module):
-    def __init__(self, state_dim, model_cfg):
-        super().__init__()
-        timestep_dim, feature_dim = state_dim
-        hidden_size = model_cfg.hidden_size
-        action_dim = 2
 
-        self.lstm1 = nn.LSTM(feature_dim, hidden_size, num_layers=1, batch_first=True)
-        self.fc1 = nn.Linear(hidden_size, 8)
-        self.relu1 = nn.ReLU()
-        self.fc2 = nn.Linear(8, 2)
+class TrendNet(nn.Module):
+
+    def __init__(self, input_shape, action_shape):
+        super().__init__()
+        state_dim = input_shape[0] * input_shape[1]
+        action_dim = action_shape[0]
+        hidden_size_1 = 128
+        hidden_size_2 = 64
+        hidden_size = 16
+
+        self.shared_w = nn.Sequential(
+            nn.Flatten(start_dim=-2, end_dim=-1),
+            nn.Linear(state_dim, hidden_size_1),
+            nn.ReLU(),
+            nn.Linear(hidden_size_1, hidden_size_2),
+            nn.ReLU(),
+            nn.Linear(hidden_size_2, hidden_size),
+            nn.ReLU()
+        )
+        self.mean = nn.Sequential(
+            nn.Linear(hidden_size, action_dim),
+            nn.Tanh()
+        )
+        self.std = nn.Sequential(
+            nn.Linear(hidden_size, action_dim)
+        )
+
+        self.value = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        lstm_o, _ = self.lstm1(x)
-        lstm_final_o = lstm_o[:, -1, :]
-        lstm_final_o = lstm_final_o.view(lstm_final_o.shape[0], -1)
-        fc1_o = self.fc1(lstm_final_o)
-        relu_o = self.relu1(fc1_o)
-        out = self.fc2(relu_o)
-        return out
+        l = self.shared_w(x)
+        mean = self.mean(l)
+        std = torch.clamp(torch.exp(self.std(l)), 1e-6, 50)
+        dist = torch.distributions.Normal(mean, std)
+        value = self.value(l) 
+        return dist, value
+    

@@ -6,11 +6,33 @@ import talib
 from talib.abstract import *
 from utils.logger import get_logger
 LOG = get_logger('data_loader')
+import plotly.graph_objects as go
 
 
-def add_features(stock_df):
+def z_close_normalize(df, close):
+    res = df.div(close, axis=0)
+    return res
+
+def range_scaling(pd_series, x_max, x_min):
+    return (pd_series - x_min) / (x_max - x_min)
+
+def normalize(stock_df):
+    z_close_norm_cols = ['open', 'high', 'low', 'macd', 'boll_ub', 'boll_lb', 'close_sma_30', 'close_sma_60']
+    stock_df.loc[:, z_close_norm_cols] = z_close_normalize(stock_df.loc[:, z_close_norm_cols], stock_df['close'])
+    
+    stock_df.loc[:, 'rsi_30'] = range_scaling(stock_df.loc[:, 'rsi_30'], 100, 0)
+    stock_df.loc[:, 'cci_30'] = range_scaling(stock_df.loc[:, 'cci_30'], 100, -100)
+    stock_df.loc[:, 'dx_30'] = range_scaling(stock_df.loc[:, 'dx_30'], 100, 0)
+
+    stock_df.loc[:, 'close'] = stock_df.loc[:, 'close'] / stock_df.loc[:, 'close'].shift(1)
+    stock_df.loc[:, 'volume'] = stock_df.loc[:, 'volume'] / stock_df.loc[:, 'volume'].shift(1) 
+
+    return stock_df
+
+
+def add_and_normalize_features(stock_df):
     #add indicators
-    """ inputs = {
+    inputs = {
         'open': stock_df['open'].to_numpy(dtype='float'), 
         'high': stock_df['high'].to_numpy(dtype='float'), 
         'low': stock_df['low'].to_numpy(dtype='float'), 
@@ -23,11 +45,10 @@ def add_features(stock_df):
     stock_df['cci_30'] = CCI(inputs, timeperiod=30)
     stock_df['dx_30'] = DX(inputs, timeperiod=30)
     stock_df['close_sma_30'] = SMA(inputs, timeperiod=30)
-    stock_df['close_sma_60'] = SMA(inputs, timeperiod=60) """
+    stock_df['close_sma_60'] = SMA(inputs, timeperiod=60)
 
-    #add output
-    stock_df['price_change'] = stock_df['close'].shift(-1) / stock_df['close'] - 1
-    stock_df['label'] = np.where(np.array(stock_df['price_change']) > 0, 1, 0)
+    #normalize
+    stock_df = normalize(stock_df)
 
     #remove na rows
     stock_df.dropna(axis=0, how='any', inplace=True)
@@ -36,110 +57,79 @@ def add_features(stock_df):
 class DataLoader:
 
 
-    def __init__(self, vn30_x_train_np, vn30_y_train_np_dict, vn30_x_val_np, vn30_y_val_np_dict, vn30_x_test_np, vn30_y_test_np_dict, input_dim):
-        self.vn30_x_train_np = vn30_x_train_np
-        self.vn30_y_train_np_dict = vn30_y_train_np_dict
-        self.vn30_x_val_np = vn30_x_val_np
-        self.vn30_y_val_np_dict = vn30_y_val_np_dict
-        self.vn30_x_test_np = vn30_x_test_np
-        self.vn30_y_test_np_dict = vn30_y_test_np_dict
-        self.input_dim = input_dim
-    
+    def __init__(self, vn30_df_dict, timesteps_dim, test_day, n_predictions, split_method):
+        self.vn30_df_dict = vn30_df_dict
+        self.timesteps_dim = timesteps_dim
+        self.test_day = test_day
+        self.n_predictions = n_predictions
+        self.split_method = split_method
+
     @classmethod
     def from_json(cls, cfg):
         LOG.info(f'Loading dataset...')
         thesis_dir = cfg.path
         test_day = cfg.test_day
-        val_day = cfg.val_day
-        seq_len = cfg.seq_len
+        timesteps_dim = cfg.timesteps_dim
+        n_predictions = cfg.n_predictions
+        split_method = cfg.split_method
 
         stock_files = os.listdir(thesis_dir)
-        x_train_dict = {}
-        y_train_dict = {}
-        x_val_dict = {}
-        y_val_dict = {}
-        x_test_dict = {}
-        y_test_dict = {}
+        vn30_df_dict = {}
         
         for file in stock_files:
+            ticket = file[:-4]
             stock_df = pd.read_csv(thesis_dir + file, index_col='date')
-            stock_df = add_features(stock_df)
+            stock_df = add_and_normalize_features(stock_df)
 
-            y = stock_df.loc[:, ['price_change', 'label']]
-            x = stock_df.drop(['price_change', 'label'], axis=1)
+            vn30_df_dict[ticket] = stock_df
+            #stock_df.to_csv('./debug/normalized_data/' + f'{ticket}.csv')
 
-            mean = x[x.index < val_day].mean(axis=0)
-            std = x[x.index < val_day].std(axis=0)
-            x = (x - mean) / std
 
-            hist_x = pd.concat([x.shift(i) for i in range((seq_len - 1), -1, -1)], axis=1)
-            hist_x.drop(hist_x.head(seq_len - 1).index, inplace=True)
-            y.drop(y.head(seq_len - 1).index, inplace=True) 
-
-            x_train = hist_x[hist_x.index < val_day]
-            x_val = hist_x[(hist_x.index >= val_day) & (hist_x.index < test_day)]
-            x_test = hist_x[hist_x.index >= test_day]
-
-            y_train = y[y.index < val_day]
-            y_val = y[(y.index >= val_day) & (y.index < test_day)]
-            y_test = y[y.index >= test_day]
-
-            x_train_dict[file[:-4]] = x_train
-            y_train_dict[file[:-4]] = y_train
-            x_val_dict[file[:-4]] = x_val
-            y_val_dict[file[:-4]] = y_val
-            x_test_dict[file[:-4]] = x_test
-            y_test_dict[file[:-4]] = y_test 
-            
-        vn30_x_train = pd.concat(list(x_train_dict.values()), axis=0).sort_index(axis=0)
-        vn30_x_train_np = np.reshape(np.array(vn30_x_train, dtype='float32'), (vn30_x_train.shape[0], seq_len, -1))
-
-        vn30_x_val = pd.concat(list(x_val_dict.values()), axis=0).sort_index(axis=0)
-        vn30_x_val_np = np.reshape(np.array(vn30_x_val, dtype='float32'), (vn30_x_val.shape[0], seq_len, -1))
-
-        vn30_x_test = pd.concat(list(x_test_dict.values()), axis=0).sort_index(axis=0)
-        vn30_x_test_np = np.reshape(np.array(vn30_x_test, dtype='float32'), (vn30_x_test.shape[0], seq_len, -1))
-
-        vn30_y_train = pd.concat(list(y_train_dict.values()), axis=0).sort_index(axis=0)
-        vn30_y_train_np_dict = {'price_change' : np.array(vn30_y_train['price_change'], dtype='float32'),\
-                                 'label' : np.array(vn30_y_train['label'], dtype='int32')}
-        
-        vn30_y_val = pd.concat(list(y_val_dict.values()), axis=0).sort_index(axis=0)
-        vn30_y_val_np_dict = {'price_change' : np.array(vn30_y_val['price_change'], dtype='float32'),\
-                                 'label' : np.array(vn30_y_val['label'], dtype='int32')}
-        
-        vn30_y_test = pd.concat(list(y_test_dict.values()), axis=0).sort_index(axis=0)
-        vn30_y_test_np_dict = {'price_change' : np.array(vn30_y_test['price_change'], dtype='float32'),\
-                                 'label' : np.array(vn30_y_test['label'], dtype='int32')}
-
-        input_dim = vn30_x_train_np.shape[1:]
-        """ 
-        print(vn30_x_val_np.shape)
-        print(vn30_y_val_np_dict)
-         """
+        """ print(type(trading_days_lst))
+        print((test_day_ind))
+        print(vn30_x_df.loc[trading_days_lst[test_day_ind + 1], :]) """
         LOG.info(f'Loading finished')
-        
-        return cls(vn30_x_train_np, vn30_y_train_np_dict, vn30_x_val_np, vn30_y_val_np_dict, vn30_x_test_np, vn30_y_test_np_dict, input_dim)
+        return cls(vn30_df_dict, timesteps_dim, test_day, n_predictions, split_method)
     
-    def get_train(self):
-        return self.vn30_x_train_np, self.vn30_y_train_np_dict
+    def get_timesteps_dim(self):
+        return self.timesteps_dim
     
-    def get_val(self):
-        return self.vn30_x_val_np, self.vn30_y_val_np_dict
+    def get_tickets_dim(self):
+        return len(self.vn30_df_dict.keys())
     
-    def get_test(self):
-        return self.vn30_x_test_np, self.vn30_y_test_np_dict
+    def get_features_dim(self):
+        return self.vn30_df_dict['ACB'].shape[1]
     
-    def get_3D_train(self):
-        "tra du lieu duoi dang channel, height, width"
-        return np.expand_dims(self.vn30_x_train_np, axis=1), self.vn30_y_train_np_dict
+    def get_samples_dim(self):
+        return self.vn30_df_dict['ACB'].shape[0]
     
-    def get_3D_val(self):
-        return np.expand_dims(self.vn30_x_val_np, axis=1), self.vn30_y_val_np_dict
+    def get_tickets(self):
+        return list(self.vn30_df_dict.keys())
     
-    def get_3D_test(self):
-        "tra du lieu duoi dang channel, height, width"
-        return np.expand_dims(self.vn30_x_test_np, axis=1), self.vn30_y_test_np_dict
+    def get_split_method(self):
+        return self.split_method
 
-    def get_input_dim(self):
-        return self.input_dim
+    def get_vn30_df_dict(self):
+        return self.vn30_df_dict
+    
+    def get_test_day(self):
+        return self.test_day
+    
+    def get_test_day_ind(self):
+        return self.get_trading_days().index(self.test_day)
+    
+    def get_trading_days(self):
+        ticket_sample = 'ACB'
+        ticket_sample_df = self.vn30_df_dict[ticket_sample]
+        trading_days = pd.unique(ticket_sample_df.index).tolist()
+        return trading_days
+    
+    def get_n_predictions(self):
+        return self.n_predictions
+    
+    def get_days_ind_train_test_split(self, test_day_ind):
+        train_start_day_ind = 0
+        train_end_day_ind = test_day_ind - 1
+        test_start_day_ind = test_day_ind
+        test_end_day_ind = len(self.get_trading_days()) - 1
+        return train_start_day_ind, train_end_day_ind, test_start_day_ind, test_end_day_ind
