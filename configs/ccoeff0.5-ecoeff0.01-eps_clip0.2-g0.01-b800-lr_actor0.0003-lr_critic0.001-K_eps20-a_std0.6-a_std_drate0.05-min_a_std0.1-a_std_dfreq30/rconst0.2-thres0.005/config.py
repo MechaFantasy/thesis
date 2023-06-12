@@ -3,20 +3,21 @@
 
 CFG = {
     "data": {
-        'path' : './data/',
+        'path' : './dowjones/',
         'test_day' : '2022-05-04',
         'split_method' : 'train_validation_test', 
-        'timesteps_dim': 3,
-        'n_predictions' : 1
+        'timesteps_dim': 30,
+        'n_predictions' : 1,
     },
     'agent': {
         'train': {
-            'episodes': 100,
+            'episodes': 20,
 
             'critic_coeff': 0.5,
             'entropy_coeff': 0.01,
             'eps_clip': 0.2,       
-            'gamma': 0.01,                
+            'gamma': 0.01,             
+            
             'batch_size': 800,  
             'lr_actor': 0.0003,       
             'lr_critic': 0.001,      
@@ -34,9 +35,10 @@ CFG = {
             'save_freq' : 20,
             'base' : './',
             "checkpoints" : "checkpoints/",
-            "logs" : "logs/",
+            "tensorboards" : "tensorboards/",
             'figs' : "figs/",
-            'configs': 'configs/'
+            'configs': 'configs/',
+            'loggers': 'loggers/'
         }
     },
 }   

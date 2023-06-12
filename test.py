@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 import torch
 import random
-from testing.test_trainer import *
+from testings.test_trainer import *
 
 ################################## set device ##################################
 
